@@ -1,0 +1,28 @@
+{
+  "name": "img2svg-plugin",
+  "version": "0.1.0",
+  "private": true,
+  "scripts": {
+    "build": "build-figma-plugin --typecheck --minify",
+    "watch": "build-figma-plugin --typecheck --watch"
+  },
+  "dependencies": {
+    "@create-figma-plugin/ui": "^4.0.3",
+    "@create-figma-plugin/utilities": "^4.0.3",
+    "esm-potrace-wasm": "^0.4.1",
+    "preact": "^10.29.1"
+  },
+  "devDependencies": {
+    "@create-figma-plugin/build": "^4.0.3",
+    "@figma/plugin-typings": "^1.124.0",
+    "typescript": "^5.6.0"
+  },
+  "figma-plugin": {
+    "editorType": ["figma", "figjam"],
+    "id": "img2svg-local",
+    "name": "Image \u2192 SVG",
+    "main": "src/main.ts",
+    "ui": "src/ui.tsx",
+    "networkAccess": { "allowedDomains": ["none"] }
+  }
+}
