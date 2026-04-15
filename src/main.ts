@@ -1,30 +1,10 @@
 import { emit, on, showUI, type EventHandler } from '@create-figma-plugin/utilities'
 
-// Payloads exchanged with the UI
-interface SelectionInfoHandler extends EventHandler {
-  name: 'SELECTION_INFO'
-  handler: (info: { count: number }) => void
-}
-interface PreviewSourceHandler extends EventHandler {
-  name: 'PREVIEW_SOURCE'
-  handler: (src: { id: string; bytes: Uint8Array }) => void
-}
-interface StartHandler extends EventHandler {
-  name: 'START'
-  handler: () => void
-}
-interface CancelHandler extends EventHandler {
-  name: 'CANCEL'
-  handler: () => void
-}
-interface TraceRequestHandler extends EventHandler {
-  name: 'TRACE_REQUEST'
-  handler: (req: {
-    id: string
-    bytes: Uint8Array
-    width: number
-    height: number
-  }) => void
+// ---- Message types ---------------------------------------------------------
+
+interface JobsHandler extends EventHandler {
+  name: 'JOBS'
+  handler: (msg: { jobs: Array<{ id: string; bytes: Uint8Array }> }) => void
 }
 interface TraceResultHandler extends EventHandler {
   name: 'TRACE_RESULT'
@@ -34,6 +14,16 @@ interface TraceErrorHandler extends EventHandler {
   name: 'TRACE_ERROR'
   handler: (err: { id: string; message: string }) => void
 }
+interface ApplyHandler extends EventHandler {
+  name: 'APPLY'
+  handler: () => void
+}
+interface CancelHandler extends EventHandler {
+  name: 'CANCEL'
+  handler: () => void
+}
+
+// ---- Selection helpers -----------------------------------------------------
 
 /**
  * Find the first IMAGE paint on a node, or null if none.
@@ -51,91 +41,144 @@ function firstImagePaint(node: SceneNode): ImagePaint | null {
   return null
 }
 
+// ---- Entry point -----------------------------------------------------------
+
+interface LiveState {
+  original: SceneNode
+  generated: SceneNode | null
+  originalVisible: boolean // pre-hide visibility so we can restore it on cancel
+}
+
 export default function () {
-  showUI({ width: 380, height: 740 })
+  showUI({ width: 420, height: 760 })
 
   const selection = figma.currentPage.selection
-  const jobs: Array<{ node: SceneNode; paint: ImagePaint }> = []
+  const originals: Array<{ node: SceneNode; paint: ImagePaint }> = []
   for (const node of selection) {
     const paint = firstImagePaint(node)
-    if (paint !== null) jobs.push({ node, paint })
+    if (paint !== null) originals.push({ node, paint })
   }
 
-  if (jobs.length === 0) {
+  if (originals.length === 0) {
     figma.notify('Select at least one image layer')
     figma.closePlugin()
     return
   }
 
-  // Tell the UI how many traceable images are in the selection, then stream
-  // the first image's bytes so the UI can render a live preview.
-  emit<SelectionInfoHandler>('SELECTION_INFO', { count: jobs.length })
+  const states = new Map<string, LiveState>()
+  for (const { node } of originals) {
+    states.set(node.id, {
+      original: node,
+      generated: null,
+      originalVisible: node.visible
+    })
+  }
+
+  // Stream every selected image's bytes to the UI so it can live-trace them.
   ;(async () => {
-    const first = jobs[0]
-    const image = figma.getImageByHash(first.paint.imageHash as string)
-    if (image === null) return
-    const bytes = await image.getBytesAsync()
-    emit<PreviewSourceHandler>('PREVIEW_SOURCE', { id: first.node.id, bytes })
-  })()
-
-  // Track originals so we can swap them when the UI replies.
-  const pending = new Map<string, SceneNode>()
-  let completed = 0
-
-  on<TraceResultHandler>('TRACE_RESULT', ({ id, svg }) => {
-    const original = pending.get(id)
-    pending.delete(id)
-    if (original === undefined || original.removed) return
-
-    const frame = figma.createNodeFromSvg(svg)
-    frame.x = original.x
-    frame.y = original.y
-    frame.resize(original.width, original.height)
-    frame.name = `${original.name} (vector)`
-
-    const parent = original.parent ?? figma.currentPage
-    const index = parent.children.indexOf(original)
-    parent.appendChild(frame)
-    if (index !== -1) parent.insertChild(index, frame)
-
-    original.remove()
-
-    completed += 1
-    if (pending.size === 0) {
-      figma.notify(`Traced ${completed} image${completed === 1 ? '' : 's'}`)
-      figma.closePlugin()
-    }
-  })
-
-  on<TraceErrorHandler>('TRACE_ERROR', ({ id, message }) => {
-    pending.delete(id)
-    figma.notify(`Trace failed: ${message}`, { error: true })
-    if (pending.size === 0) figma.closePlugin()
-  })
-
-  on<CancelHandler>('CANCEL', () => {
-    figma.closePlugin()
-  })
-
-  // Start tracing only once the UI tells us the user has confirmed options.
-  on<StartHandler>('START', async () => {
-    for (const { node, paint } of jobs) {
+    const jobs: Array<{ id: string; bytes: Uint8Array }> = []
+    for (const { node, paint } of originals) {
       const image = figma.getImageByHash(paint.imageHash as string)
       if (image === null) continue
       const bytes = await image.getBytesAsync()
+      jobs.push({ id: node.id, bytes })
+    }
+    emit<JobsHandler>('JOBS', { jobs })
+  })()
 
-      pending.set(node.id, node)
-      emit<TraceRequestHandler>('TRACE_REQUEST', {
-        id: node.id,
-        bytes,
-        width: node.width,
-        height: node.height
-      })
+  // A fresh trace result comes in → swap the generated frame in place.
+  on<TraceResultHandler>('TRACE_RESULT', ({ id, svg }) => {
+    const state = states.get(id)
+    if (state === undefined || state.original.removed) return
+
+    // Reject output that isn't a full <svg> document — Figma rejects it and
+    // throws, which would otherwise hang the plugin.
+    if (!svg.includes('<svg')) {
+      figma.notify('Tracer returned malformed SVG', { error: true })
+      return
     }
 
-    if (pending.size === 0) {
-      figma.notify('No image bytes found')
-      figma.closePlugin()
+    let frame: FrameNode
+    try {
+      frame = figma.createNodeFromSvg(svg)
+    } catch (err) {
+      figma.notify(`Figma rejected traced SVG: ${String(err)}`, { error: true })
+      return
+    }
+
+    // Build the replacement frame from the traced SVG.
+    frame.x = state.original.x
+    frame.y = state.original.y
+    frame.resize(state.original.width, state.original.height)
+    frame.name = `${state.original.name} (vector)`
+
+    const parent = state.original.parent ?? figma.currentPage
+    parent.appendChild(frame)
+    const index = parent.children.indexOf(state.original)
+    if (index !== -1) parent.insertChild(index, frame)
+
+    // First trace for this node: hide the original so only the vector is visible.
+    if (state.generated === null && state.original.visible) {
+      state.original.visible = false
+    }
+
+    // Remove the previous generated frame (if any) only after the new one is in
+    // place, so the Figma viewport never shows a gap.
+    if (state.generated !== null && !state.generated.removed) {
+      state.generated.remove()
+    }
+    state.generated = frame
+  })
+
+  on<TraceErrorHandler>('TRACE_ERROR', ({ message }) => {
+    figma.notify(`Trace failed: ${message}`, { error: true })
+  })
+
+  // Track why the plugin is closing so the `close` handler doesn't undo work
+  // that Apply/Cancel already committed.
+  let intent: 'apply' | 'cancel' | null = null
+
+  // Apply: commit everything by permanently removing the hidden originals.
+  on<ApplyHandler>('APPLY', () => {
+    intent = 'apply'
+    let committed = 0
+    for (const state of states.values()) {
+      if (state.generated !== null && !state.original.removed) {
+        state.original.remove()
+        committed += 1
+      }
+    }
+    if (committed === 0) {
+      figma.notify('No images were traced')
+    } else {
+      figma.notify(`Traced ${committed} image${committed === 1 ? '' : 's'}`)
+    }
+    figma.closePlugin()
+  })
+
+  // Cancel: revert every live change — remove generated frames, restore originals.
+  on<CancelHandler>('CANCEL', () => {
+    intent = 'cancel'
+    for (const state of states.values()) {
+      if (state.generated !== null && !state.generated.removed) {
+        state.generated.remove()
+      }
+      state.generated = null
+      if (!state.original.removed) {
+        state.original.visible = state.originalVisible
+      }
+    }
+    figma.closePlugin()
+  })
+
+  // X button in the plugin window chrome → no explicit choice was made.
+  // Default to Apply so the user keeps what's currently visible on the canvas.
+  figma.on('close', () => {
+    if (intent !== null) return
+    for (const state of states.values()) {
+      if (state.generated !== null && !state.original.removed) {
+        state.original.remove()
+      }
     }
   })
 }

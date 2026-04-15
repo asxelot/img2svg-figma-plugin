@@ -18,28 +18,19 @@ import { useEffect, useRef, useState } from 'preact/hooks'
 
 import { DEFAULT_OPTIONS, ensureInit, trace, type TraceOptions } from './tracer'
 
-interface SelectionInfoHandler extends EventHandler {
-  name: 'SELECTION_INFO'
-  handler: (info: { count: number }) => void
+interface JobsHandler extends EventHandler {
+  name: 'JOBS'
+  handler: (msg: { jobs: Array<{ id: string; bytes: Uint8Array }> }) => void
 }
-interface PreviewSourceHandler extends EventHandler {
-  name: 'PREVIEW_SOURCE'
-  handler: (src: { id: string; bytes: Uint8Array }) => void
-}
-interface TraceRequestHandler extends EventHandler {
-  name: 'TRACE_REQUEST'
-  handler: (req: {
-    id: string
-    bytes: Uint8Array
-    width: number
-    height: number
-  }) => void
+
+interface Job {
+  id: string
+  bytes: Uint8Array
 }
 
 type Stage =
   | { kind: 'loading' }
   | { kind: 'ready'; count: number }
-  | { kind: 'working'; done: number; total: number }
   | { kind: 'error'; message: string }
 
 type Preview =
@@ -48,7 +39,14 @@ type Preview =
   | { kind: 'ready'; svg: string }
   | { kind: 'error'; message: string }
 
-const PREVIEW_DEBOUNCE_MS = 200
+/** Preserve the last good SVG while re-tracing so the preview doesn't flicker. */
+function asTracing(p: Preview): Preview {
+  if (p.kind === 'ready') return { kind: 'tracing', svg: p.svg }
+  if (p.kind === 'tracing') return p
+  return { kind: 'tracing', svg: null }
+}
+
+const PREVIEW_HEIGHT_PX = 180
 
 const TURN_POLICIES: DropdownOption[] = [
   { value: '0', text: 'Black' },
@@ -69,77 +67,77 @@ function Plugin() {
   const [stage, setStage] = useState<Stage>({ kind: 'loading' })
   const [opts, setOpts] = useState<Required<TraceOptions>>(DEFAULT_OPTIONS)
   const [preview, setPreview] = useState<Preview>({ kind: 'empty' })
-  const [source, setSource] = useState<Uint8Array | null>(null)
+  const [jobs, setJobs] = useState<Job[]>([])
 
-  // Latest options for use inside stale closures.
-  const optsRef = useRef(opts)
-  optsRef.current = opts
+  // Run-latest loop state. Each options/jobs change bumps `dirtyRef` and either
+  // starts a trace batch or lets the in-flight one pick up the newest values.
+  const runningRef = useRef(false)
+  const dirtyRef = useRef(false)
+  const latestRef = useRef<{ jobs: Job[]; opts: Required<TraceOptions> }>({
+    jobs: [],
+    opts
+  })
 
-  // Serialize previews: each change bumps the generation; late results are dropped.
-  const genRef = useRef(0)
-
-  // Register message handlers once.
   useEffect(() => {
     ensureInit().catch((err) =>
       setStage({ kind: 'error', message: `WASM init failed: ${String(err)}` })
     )
 
-    const offSel = on<SelectionInfoHandler>('SELECTION_INFO', ({ count }) => {
-      setStage((s) => (s.kind === 'loading' ? { kind: 'ready', count } : s))
+    const offJobs = on<JobsHandler>('JOBS', ({ jobs }) => {
+      setJobs(jobs)
+      setStage({ kind: 'ready', count: jobs.length })
     })
 
-    const offSrc = on<PreviewSourceHandler>('PREVIEW_SOURCE', ({ bytes }) => {
-      setSource(bytes)
-    })
-
-    let total = 0
-    let done = 0
-    const offReq = on<TraceRequestHandler>(
-      'TRACE_REQUEST',
-      async ({ id, bytes }) => {
-        total += 1
-        setStage({ kind: 'working', done, total })
-        try {
-          const svg = await trace(bytes, optsRef.current)
-          emit('TRACE_RESULT', { id, svg })
-        } catch (err) {
-          emit('TRACE_ERROR', { id, message: String(err) })
-        } finally {
-          done += 1
-          setStage({ kind: 'working', done, total })
-        }
-      }
-    )
-
-    return () => {
-      offSel()
-      offSrc()
-      offReq()
-    }
+    return () => offJobs()
   }, [])
 
-  // Re-trace the preview whenever source or options change (debounced).
   useEffect(() => {
-    if (source === null) return
-    const gen = ++genRef.current
-    setPreview((p) => ({
-      kind: 'tracing',
-      svg: p.kind === 'ready' ? p.svg : p.kind === 'tracing' ? p.svg : null
-    }))
+    latestRef.current = { jobs, opts }
+    if (jobs.length === 0) return
+    dirtyRef.current = true
+    if (runningRef.current) return
 
-    const timer = setTimeout(async () => {
+    runningRef.current = true
+    setPreview((p) => asTracing(p))
+    ;(async () => {
       try {
-        const svg = await trace(source, opts)
-        if (gen === genRef.current) setPreview({ kind: 'ready', svg })
-      } catch (err) {
-        if (gen === genRef.current) {
-          setPreview({ kind: 'error', message: String(err) })
-        }
-      }
-    }, PREVIEW_DEBOUNCE_MS)
+        while (dirtyRef.current) {
+          dirtyRef.current = false
+          const { jobs: js, opts: o } = latestRef.current
+          if (js.length === 0) return
 
-    return () => clearTimeout(timer)
-  }, [source, opts])
+          let previewSvg: string | null = null
+          for (let i = 0; i < js.length; i += 1) {
+            const job = js[i]
+            try {
+              const svg = await trace(job.bytes, o)
+              emit('TRACE_RESULT', { id: job.id, svg })
+              if (i === 0) previewSvg = svg
+            } catch (err) {
+              emit('TRACE_ERROR', { id: job.id, message: String(err) })
+              if (i === 0) {
+                setPreview({ kind: 'error', message: String(err) })
+                previewSvg = null
+              }
+            }
+            // Bail out of the inner loop if options changed mid-batch — the
+            // outer loop will restart with the freshest options.
+            if (dirtyRef.current) break
+          }
+
+          if (previewSvg !== null) {
+            if (!dirtyRef.current) {
+              setPreview({ kind: 'ready', svg: previewSvg })
+            } else {
+              setPreview((p) => asTracing(p))
+            }
+          }
+        }
+      } finally {
+        runningRef.current = false
+      }
+    })()
+  }, [jobs, opts])
 
   function set<K extends keyof TraceOptions>(
     key: K,
@@ -147,9 +145,6 @@ function Plugin() {
   ) {
     setOpts((prev) => ({ ...prev, [key]: value }))
   }
-
-  const working = stage.kind === 'working'
-  const disabled = working
 
   return (
     <Container space="medium">
@@ -169,7 +164,6 @@ function Plugin() {
         min={0}
         max={100}
         step={1}
-        disabled={disabled}
         onChange={(v) => set('turdsize', v)}
       />
 
@@ -177,7 +171,6 @@ function Plugin() {
         <Dropdown
           options={TURN_POLICIES}
           value={String(opts.turnpolicy)}
-          disabled={disabled}
           onValueChange={(v) => set('turnpolicy', Number(v))}
         />
       </EnumRow>
@@ -189,14 +182,12 @@ function Plugin() {
         max={1.334}
         step={0.01}
         precision={3}
-        disabled={disabled}
         onChange={(v) => set('alphamax', v)}
       />
 
       <BoolRow
         label="opticurve"
         value={opts.opticurve === 1}
-        disabled={disabled}
         onChange={(v) => set('opticurve', v ? 1 : 0)}
       />
 
@@ -207,21 +198,23 @@ function Plugin() {
         max={1}
         step={0.01}
         precision={2}
-        disabled={disabled}
         onChange={(v) => set('opttolerance', v)}
       />
 
       <BoolRow
         label="pathonly"
         value={opts.pathonly}
-        disabled={disabled}
         onChange={(v) => set('pathonly', v)}
       />
 
       <BoolRow
-        label="extractcolors"
-        value={opts.extractcolors}
-        disabled={disabled}
+        label={
+          opts.pathonly
+            ? 'extractcolors (forced off by pathonly)'
+            : 'extractcolors'
+        }
+        value={opts.pathonly ? false : opts.extractcolors}
+        disabled={opts.pathonly}
         onChange={(v) => set('extractcolors', v)}
       />
 
@@ -231,7 +224,6 @@ function Plugin() {
         min={1}
         max={32}
         step={1}
-        disabled={disabled}
         onChange={(v) => set('posterizelevel', v)}
       />
 
@@ -239,7 +231,6 @@ function Plugin() {
         <SegmentedControl
           options={POSTERIZATION_ALGORITHMS}
           value={String(opts.posterizationalgorithm)}
-          disabled={disabled}
           onValueChange={(v) => set('posterizationalgorithm', Number(v))}
         />
       </EnumRow>
@@ -251,12 +242,11 @@ function Plugin() {
       <Button
         fullWidth
         disabled={stage.kind !== 'ready' || stage.count === 0}
-        loading={working}
-        onClick={() => emit('START')}
+        onClick={() => emit('APPLY')}
       >
         {stage.kind === 'ready'
-          ? `Trace ${stage.count} image${stage.count === 1 ? '' : 's'}`
-          : 'Trace'}
+          ? `Apply to ${stage.count} image${stage.count === 1 ? '' : 's'}`
+          : 'Apply'}
       </Button>
       <VerticalSpace space="small" />
       <Button fullWidth secondary onClick={() => emit('CANCEL')}>
@@ -281,7 +271,7 @@ function PreviewPane({ preview }: { preview: Preview }) {
   const wrapperStyle = {
     position: 'relative' as const,
     width: '100%',
-    height: '180px',
+    height: `${PREVIEW_HEIGHT_PX}px`,
     background:
       'repeating-conic-gradient(rgba(0,0,0,0.06) 0% 25%, transparent 0% 50%) 50% / 16px 16px',
     borderRadius: '4px',
@@ -337,8 +327,6 @@ function renderStatus(s: Stage): string {
       return 'Loading tracer…'
     case 'ready':
       return s.count === 1 ? '1 image selected' : `${s.count} images selected`
-    case 'working':
-      return `Tracing ${s.done}/${s.total}…`
     case 'error':
       return s.message
   }
@@ -351,7 +339,6 @@ function NumericSlider(props: {
   max: number
   step: number
   precision?: number
-  disabled?: boolean
   onChange: (v: number) => void
 }) {
   const display =
@@ -372,7 +359,6 @@ function NumericSlider(props: {
         maximum={props.max}
         increment={props.step}
         value={String(props.value)}
-        disabled={props.disabled}
         onNumericValueInput={(v) => props.onChange(v)}
       />
       <VerticalSpace space="small" />
