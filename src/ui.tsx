@@ -88,6 +88,9 @@ function Plugin() {
       setStage({ kind: 'ready', count: jobs.length })
     })
 
+    // Handlers are wired up — tell main it can stream the selection.
+    emit('UI_READY')
+
     return () => offJobs()
   }, [])
 
@@ -158,8 +161,12 @@ function Plugin() {
       <Divider />
       <VerticalSpace space="medium" />
 
+      <SectionHeader>Shape</SectionHeader>
+
       <NumericSlider
-        label="turdsize"
+        label="Despeckle"
+        tech="turdsize"
+        hint="Discard shapes smaller than N pixels."
         value={opts.turdsize}
         min={0}
         max={100}
@@ -167,16 +174,22 @@ function Plugin() {
         onChange={(v) => set('turdsize', v)}
       />
 
-      <EnumRow label="turnpolicy">
+      <EnumField
+        label="Turn policy"
+        tech="turnpolicy"
+        hint="How to resolve ambiguous path junctions."
+      >
         <Dropdown
           options={TURN_POLICIES}
           value={String(opts.turnpolicy)}
           onValueChange={(v) => set('turnpolicy', Number(v))}
         />
-      </EnumRow>
+      </EnumField>
 
       <NumericSlider
-        label="alphamax"
+        label="Corner smoothing"
+        tech="alphamax"
+        hint="Low = crisp corners, high = everything curves."
         value={opts.alphamax}
         min={0}
         max={1.334}
@@ -185,14 +198,18 @@ function Plugin() {
         onChange={(v) => set('alphamax', v)}
       />
 
-      <BoolRow
-        label="opticurve"
+      <ToggleField
+        label="Optimize curves"
+        tech="opticurve"
+        hint="Merge short segments into longer splines."
         value={opts.opticurve === 1}
         onChange={(v) => set('opticurve', v ? 1 : 0)}
       />
 
       <NumericSlider
-        label="opttolerance"
+        label="Curve tolerance"
+        tech="opttolerance"
+        hint="How aggressively to simplify (applies when Optimize curves is on)."
         value={opts.opttolerance}
         min={0}
         max={1}
@@ -201,17 +218,24 @@ function Plugin() {
         onChange={(v) => set('opttolerance', v)}
       />
 
-      <BoolRow
-        label="pathonly"
+      <VerticalSpace space="small" />
+      <SectionHeader>Color</SectionHeader>
+
+      <ToggleField
+        label="Path only"
+        tech="pathonly"
+        hint="Emit a single monochrome path. Forces color extraction off."
         value={opts.pathonly}
         onChange={(v) => set('pathonly', v)}
       />
 
-      <BoolRow
-        label={
+      <ToggleField
+        label="Extract colors"
+        tech="extractcolors"
+        hint={
           opts.pathonly
-            ? 'extractcolors (forced off by pathonly)'
-            : 'extractcolors'
+            ? 'Disabled while Path only is on.'
+            : 'Emit one layer per quantized color.'
         }
         value={opts.pathonly ? false : opts.extractcolors}
         disabled={opts.pathonly}
@@ -219,7 +243,9 @@ function Plugin() {
       />
 
       <NumericSlider
-        label="posterizelevel"
+        label="Posterize levels"
+        tech="posterizelevel"
+        hint="Number of tonal bands. 1 = stark, higher = more detail."
         value={opts.posterizelevel}
         min={1}
         max={32}
@@ -227,13 +253,17 @@ function Plugin() {
         onChange={(v) => set('posterizelevel', v)}
       />
 
-      <EnumRow label="posterizationalgorithm">
+      <EnumField
+        label="Posterize algorithm"
+        tech="posterizationalgorithm"
+        hint="Simple: hard bands. Interpolation: smooth blends."
+      >
         <SegmentedControl
           options={POSTERIZATION_ALGORITHMS}
           value={String(opts.posterizationalgorithm)}
           onValueChange={(v) => set('posterizationalgorithm', Number(v))}
         />
-      </EnumRow>
+      </EnumField>
 
       <VerticalSpace space="medium" />
       <Divider />
@@ -332,8 +362,66 @@ function renderStatus(s: Stage): string {
   }
 }
 
+function SectionHeader(props: { children: preact.ComponentChildren }) {
+  return (
+    <Fragment>
+      <Text>
+        <span
+          style={{
+            textTransform: 'uppercase',
+            letterSpacing: '0.08em',
+            fontSize: '10px',
+            opacity: 0.55
+          }}
+        >
+          {props.children}
+        </span>
+      </Text>
+      <VerticalSpace space="small" />
+    </Fragment>
+  )
+}
+
+function FieldLabel(props: {
+  label: string
+  tech: string
+  valueDisplay?: string
+}) {
+  return (
+    <div
+      title={props.tech}
+      style={{
+        display: 'flex',
+        justifyContent: 'space-between',
+        alignItems: 'baseline'
+      }}
+    >
+      <Text>
+        <strong>{props.label}</strong>
+      </Text>
+      {props.valueDisplay !== undefined && (
+        <Text>
+          <span style={{ opacity: 0.7 }}>{props.valueDisplay}</span>
+        </Text>
+      )}
+    </div>
+  )
+}
+
+function Hint(props: { children: preact.ComponentChildren }) {
+  return (
+    <Text>
+      <span style={{ opacity: 0.5, fontSize: '11px', lineHeight: 1.4 }}>
+        {props.children}
+      </span>
+    </Text>
+  )
+}
+
 function NumericSlider(props: {
   label: string
+  tech: string
+  hint?: string
   value: number
   min: number
   max: number
@@ -347,12 +435,7 @@ function NumericSlider(props: {
       : props.value.toFixed(props.precision)
   return (
     <Fragment>
-      <div style={{ display: 'flex', justifyContent: 'space-between' }}>
-        <Text>{props.label}</Text>
-        <Text>
-          <span style={{ opacity: 0.6 }}>{display}</span>
-        </Text>
-      </div>
+      <FieldLabel label={props.label} tech={props.tech} valueDisplay={display} />
       <VerticalSpace space="extraSmall" />
       <RangeSlider
         minimum={props.min}
@@ -361,40 +444,68 @@ function NumericSlider(props: {
         value={String(props.value)}
         onNumericValueInput={(v) => props.onChange(v)}
       />
+      {props.hint !== undefined && (
+        <Fragment>
+          <VerticalSpace space="extraSmall" />
+          <Hint>{props.hint}</Hint>
+        </Fragment>
+      )}
       <VerticalSpace space="small" />
     </Fragment>
   )
 }
 
-function BoolRow(props: {
+function ToggleField(props: {
   label: string
+  tech: string
+  hint?: string
   value: boolean
   disabled?: boolean
   onChange: (v: boolean) => void
 }) {
   return (
     <Fragment>
-      <Checkbox
-        value={props.value}
-        disabled={props.disabled}
-        onValueChange={(v) => props.onChange(v)}
-      >
-        <Text>{props.label}</Text>
-      </Checkbox>
+      <div title={props.tech}>
+        <Checkbox
+          value={props.value}
+          disabled={props.disabled}
+          onValueChange={(v) => props.onChange(v)}
+        >
+          <Text>
+            <strong>{props.label}</strong>
+          </Text>
+        </Checkbox>
+      </div>
+      {props.hint !== undefined && (
+        <Fragment>
+          <VerticalSpace space="extraSmall" />
+          <div style={{ paddingLeft: '24px' }}>
+            <Hint>{props.hint}</Hint>
+          </div>
+        </Fragment>
+      )}
       <VerticalSpace space="small" />
     </Fragment>
   )
 }
 
-function EnumRow(props: {
+function EnumField(props: {
   label: string
+  tech: string
+  hint?: string
   children: preact.ComponentChildren
 }) {
   return (
     <Fragment>
-      <Text>{props.label}</Text>
+      <FieldLabel label={props.label} tech={props.tech} />
       <VerticalSpace space="extraSmall" />
       {props.children}
+      {props.hint !== undefined && (
+        <Fragment>
+          <VerticalSpace space="extraSmall" />
+          <Hint>{props.hint}</Hint>
+        </Fragment>
+      )}
       <VerticalSpace space="small" />
     </Fragment>
   )

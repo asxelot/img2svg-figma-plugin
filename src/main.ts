@@ -2,6 +2,10 @@ import { emit, on, showUI, type EventHandler } from '@create-figma-plugin/utilit
 
 // ---- Message types ---------------------------------------------------------
 
+interface UiReadyHandler extends EventHandler {
+  name: 'UI_READY'
+  handler: () => void
+}
 interface JobsHandler extends EventHandler {
   name: 'JOBS'
   handler: (msg: { jobs: Array<{ id: string; bytes: Uint8Array }> }) => void
@@ -50,7 +54,7 @@ interface LiveState {
 }
 
 export default function () {
-  showUI({ width: 420, height: 760 })
+  showUI({ width: 420, height: 960 })
 
   const selection = figma.currentPage.selection
   const originals: Array<{ node: SceneNode; paint: ImagePaint }> = []
@@ -74,8 +78,10 @@ export default function () {
     })
   }
 
-  // Stream every selected image's bytes to the UI so it can live-trace them.
-  ;(async () => {
+  // Wait for the UI to signal it has registered its handlers before we emit
+  // JOBS — otherwise the UI's `on('JOBS', …)` may not exist yet and
+  // create-figma-plugin throws "No event handler with name `JOBS`".
+  on<UiReadyHandler>('UI_READY', async () => {
     const jobs: Array<{ id: string; bytes: Uint8Array }> = []
     for (const { node, paint } of originals) {
       const image = figma.getImageByHash(paint.imageHash as string)
@@ -84,7 +90,7 @@ export default function () {
       jobs.push({ id: node.id, bytes })
     }
     emit<JobsHandler>('JOBS', { jobs })
-  })()
+  })
 
   // A fresh trace result comes in → swap the generated frame in place.
   on<TraceResultHandler>('TRACE_RESULT', ({ id, svg }) => {
