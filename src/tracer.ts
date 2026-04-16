@@ -32,6 +32,9 @@ export const DEFAULT_OPTIONS: Required<TraceOptions> = {
   posterizationalgorithm: 0
 }
 
+/** Cap the longest edge so pixel data fits in the WASM heap. */
+const MAX_DIM = 1024
+
 /** Trace a raster image (PNG/JPG bytes via Blob) into an SVG string. */
 export async function trace(
   bytes: Uint8Array,
@@ -40,8 +43,21 @@ export async function trace(
   await ensureInit()
   // Cast: modern lib.dom types Uint8Array as Uint8Array<ArrayBufferLike> which
   // isn't assignable to BlobPart, but the runtime accepts it fine.
-  const blob = new Blob([bytes as BlobPart])
-  const bitmap = await createImageBitmap(blob)
+  const blob = new Blob([new Uint8Array(bytes) as BlobPart])
+  let bitmap = await createImageBitmap(blob)
+
+  // Downscale large images — the WASM heap is limited and full resolution
+  // doesn't improve vector output.
+  const longest = Math.max(bitmap.width, bitmap.height)
+  if (longest > MAX_DIM) {
+    const scale = MAX_DIM / longest
+    bitmap = await createImageBitmap(blob, {
+      resizeWidth: Math.round(bitmap.width * scale),
+      resizeHeight: Math.round(bitmap.height * scale),
+      resizeQuality: 'high'
+    })
+  }
+
   const merged = { ...DEFAULT_OPTIONS, ...options }
   // Potrace's `pathonly + extractcolors` combo returns a mangled mix of <g>
   // tags and raw M-commands fragmented by `split("M")`, producing invalid
