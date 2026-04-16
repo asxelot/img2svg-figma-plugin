@@ -1,6 +1,7 @@
 {
-  "name": "img2svg-plugin",
+  "name": "img2svg",
   "version": "0.1.0",
+  "license": "GPL-2.0",
   "private": true,
   "scripts": {
     "build": "build-figma-plugin --typecheck --minify",
@@ -20,7 +21,7 @@
   "figma-plugin": {
     "editorType": ["figma", "figjam"],
     "id": "img2svg-local",
-    "name": "Image \u2192 SVG",
+    "name": "img2svg",
     "main": "src/main.ts",
     "ui": "src/ui.tsx",
     "networkAccess": { "allowedDomains": ["none"] }

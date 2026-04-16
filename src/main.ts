@@ -178,12 +178,15 @@ export default function () {
   })
 
   // X button in the plugin window chrome → no explicit choice was made.
-  // Default to Apply so the user keeps what's currently visible on the canvas.
+  // Default to Cancel so the user's original images are restored.
   figma.on('close', () => {
     if (intent !== null) return
     for (const state of states.values()) {
-      if (state.generated !== null && !state.original.removed) {
-        state.original.remove()
+      if (state.generated !== null && !state.generated.removed) {
+        state.generated.remove()
+      }
+      if (!state.original.removed) {
+        state.original.visible = state.originalVisible
       }
     }
   })
